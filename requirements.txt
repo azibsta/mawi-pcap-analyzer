@@ -1,0 +1,13 @@
+# Core data processing
+pandas
+numpy
+
+# Required by Pandas for Parquet cache files
+pyarrow
+
+# Pure-Python PCAP parser fallback
+dpkt
+
+# CLI UX and formatting
+tqdm
+rich
