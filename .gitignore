@@ -1,0 +1,12 @@
+# Ignore the raw data folder
+data/
+
+# Ignore the generated cache files
+cache/
+
+# Ignore the exported reports
+reports/
+
+# Ignore compiled C++ executables
+*.exe
+mawi_engine
