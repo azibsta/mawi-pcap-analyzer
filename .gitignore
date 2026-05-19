@@ -10,3 +10,7 @@ reports/
 # Ignore compiled C++ executables
 *.exe
 mawi_engine
+
+# Ignore Python cache and compiled files
+__pycache__/
+*.pyc
