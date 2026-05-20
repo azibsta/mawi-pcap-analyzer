@@ -90,8 +90,8 @@
                 </div>
 
                 <div class="space-y-8">
-                    <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-md h-96 overflow-y-auto">
-                        <h2 class="text-xl font-bold mb-6 sticky top-0 bg-white dark:bg-gray-800 py-2 border-b dark:border-gray-700">Historical Milestones</h2>
+                    <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-md h-96 overflow-y-auto relative">
+                        <h2 class="text-xl font-bold mb-6 sticky top-0 bg-white dark:bg-gray-800 py-2 border-b dark:border-gray-700 z-10">Historical Milestones</h2>
                         <ul id="milestones-list" class="relative border-l border-gray-200 dark:border-gray-700 ml-3">
                             </ul>
                     </div>
@@ -102,7 +102,9 @@
                             <select id="yearSelect" class="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block p-2 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white dark:focus:ring-blue-500 dark:focus:border-blue-500">
                                 </select>
                         </div>
-                        <canvas id="portChart"></canvas>
+                        <div class="relative h-64 w-full">
+                            <canvas id="portChart"></canvas>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -284,11 +286,13 @@
                 
                 let labels = [];
                 let dataPoints = [];
+                
                 // Find top_dst_port columns
                 for(let i = 1; i <= 5; i++) {
                     const port = yearData[`top_dst_port_${i}`];
                     const pkts = yearData[`top_dst_port_${i}_pkts`];
-                    if(port) {
+                    
+                    if(port !== undefined && port !== null && pkts > 0) {
                         labels.push(`Port ${port}`);
                         dataPoints.push(pkts);
                     }
