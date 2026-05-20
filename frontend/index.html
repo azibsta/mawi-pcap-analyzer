@@ -1,95 +1,345 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" class="light">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MAWI Traffic Dashboard</title>
+    <title>MAWI Traffic Research Dashboard</title>
+    
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = { darkMode: 'class' }
+    </script>
+    
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    
+    <link rel="stylesheet" href="https://cdn.datatables.net/1.13.6/css/jquery.dataTables.min.css">
+    <script src="https://code.jquery.com/jquery-3.7.0.min.js"></script>
+    <script src="https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js"></script>
+
     <style>
-        body { font-family: system-ui, sans-serif; background: #f4f4f9; padding: 20px; color: #333; }
-        .dashboard { max-width: 1000px; margin: 0 auto; }
-        .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); margin-bottom: 20px; }
-        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; margin-bottom: 20px; }
-        .stat-box { background: #e3f2fd; padding: 15px; border-radius: 6px; text-align: center; }
-        .stat-box h3 { margin: 0 0 10px 0; font-size: 14px; color: #555; }
-        .stat-box p { margin: 0; font-size: 24px; font-weight: bold; color: #1976d2; }
+        /* Custom tweaks for DataTables in Dark Mode */
+        .dark .dataTables_wrapper .dataTables_length, 
+        .dark .dataTables_wrapper .dataTables_filter, 
+        .dark .dataTables_wrapper .dataTables_info, 
+        .dark .dataTables_wrapper .dataTables_paginate {
+            color: #e5e7eb;
+        }
+        .dark table.dataTable tbody tr { background-color: #1f2937; color: #e5e7eb; }
+        .dark table.dataTable thead th { color: #f3f4f6; }
     </style>
 </head>
-<body>
+<body class="bg-gray-100 text-gray-900 dark:bg-gray-900 dark:text-gray-100 transition-colors duration-200 font-sans p-6">
 
-<div class="dashboard">
-    <h1>MAWI Traffic Research Trends</h1>
-    
-    <div class="stats-grid">
-        <div class="stat-box">
-            <h3>Years Analyzed</h3>
-            <p id="stat-years">--</p>
+    <div class="max-w-7xl mx-auto">
+        <div class="flex flex-col md:flex-row justify-between items-center mb-8 bg-white dark:bg-gray-800 p-6 rounded-lg shadow-md">
+            <div>
+                <h1 class="text-3xl font-bold text-blue-600 dark:text-blue-400">MAWI Traffic Dashboard</h1>
+                <p class="text-gray-500 dark:text-gray-400 text-sm mt-1">Professional Protocol Trend Analysis</p>
+            </div>
+            <div class="flex items-center gap-4 mt-4 md:mt-0">
+                <input type="file" id="fileUpload" accept=".json" class="block w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-md file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 dark:file:bg-gray-700 dark:file:text-blue-400">
+                <button id="darkModeToggle" class="px-4 py-2 bg-gray-200 dark:bg-gray-700 rounded-md font-semibold hover:bg-gray-300 dark:hover:bg-gray-600 transition">
+                    🌙 Dark Mode
+                </button>
+            </div>
         </div>
-        <div class="stat-box">
-            <h3>Max Encrypted Traffic</h3>
-            <p id="stat-enc">--%</p>
+
+        <div id="dashboardContent" class="hidden">
+            
+            <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+                <div class="bg-blue-50 dark:bg-gray-800 p-6 rounded-lg shadow-sm border border-blue-100 dark:border-gray-700 text-center">
+                    <h3 class="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Years Analyzed</h3>
+                    <p id="stat-years" class="text-3xl font-bold text-blue-600 dark:text-blue-400 mt-2">--</p>
+                </div>
+                <div class="bg-purple-50 dark:bg-gray-800 p-6 rounded-lg shadow-sm border border-purple-100 dark:border-gray-700 text-center">
+                    <h3 class="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Peak Encryption</h3>
+                    <p id="stat-enc" class="text-3xl font-bold text-purple-600 dark:text-purple-400 mt-2">--%</p>
+                </div>
+                <div class="bg-orange-50 dark:bg-gray-800 p-6 rounded-lg shadow-sm border border-orange-100 dark:border-gray-700 text-center">
+                    <h3 class="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Max Anomaly Z-Score</h3>
+                    <p id="stat-anom" class="text-3xl font-bold text-orange-600 dark:text-orange-400 mt-2">--</p>
+                </div>
+                <div class="bg-green-50 dark:bg-gray-800 p-6 rounded-lg shadow-sm border border-green-100 dark:border-gray-700 text-center">
+                    <h3 class="text-sm font-semibold text-gray-500 dark:text-gray-400 uppercase tracking-wider">Latest Total Volume</h3>
+                    <p id="stat-vol" class="text-3xl font-bold text-green-600 dark:text-green-400 mt-2">--</p>
+                </div>
+            </div>
+
+            <div class="grid grid-cols-1 lg:grid-cols-3 gap-8 mb-8">
+                <div class="lg:col-span-2 space-y-8">
+                    <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-md">
+                        <h2 class="text-xl font-bold mb-4">Protocol Crossover (TCP vs UDP)</h2>
+                        <canvas id="protocolChart"></canvas>
+                    </div>
+                    
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                        <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-md">
+                            <h2 class="text-xl font-bold mb-4">HTTP vs HTTPS</h2>
+                            <canvas id="httpChart"></canvas>
+                        </div>
+                        <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-md">
+                            <h2 class="text-xl font-bold mb-4">Avg Packet Size (Bytes)</h2>
+                            <canvas id="pktSizeChart"></canvas>
+                        </div>
+                    </div>
+
+                    <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-md">
+                        <h2 class="text-xl font-bold mb-4">Encryption Growth & Anomalies</h2>
+                        <canvas id="encryptionChart"></canvas>
+                    </div>
+                </div>
+
+                <div class="space-y-8">
+                    <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-md h-96 overflow-y-auto">
+                        <h2 class="text-xl font-bold mb-6 sticky top-0 bg-white dark:bg-gray-800 py-2 border-b dark:border-gray-700">Historical Milestones</h2>
+                        <ul id="milestones-list" class="relative border-l border-gray-200 dark:border-gray-700 ml-3">
+                            </ul>
+                    </div>
+
+                    <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-md">
+                        <div class="flex justify-between items-center mb-4">
+                            <h2 class="text-xl font-bold">Top Ports</h2>
+                            <select id="yearSelect" class="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block p-2 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white dark:focus:ring-blue-500 dark:focus:border-blue-500">
+                                </select>
+                        </div>
+                        <canvas id="portChart"></canvas>
+                    </div>
+                </div>
+            </div>
+
+            <div class="bg-white dark:bg-gray-800 p-6 rounded-lg shadow-md mb-8 overflow-x-auto">
+                <h2 class="text-xl font-bold mb-4">Raw Dataset</h2>
+                <table id="rawDataTable" class="display w-full text-left text-sm">
+                    <thead>
+                        <tr>
+                            <th>Year</th>
+                            <th>Total Pkts</th>
+                            <th>Total Bytes</th>
+                            <th>TCP %</th>
+                            <th>UDP %</th>
+                            <th>HTTP %</th>
+                            <th>HTTPS %</th>
+                            <th>Encrypted %</th>
+                            <th>Anomaly (Z)</th>
+                        </tr>
+                    </thead>
+                    <tbody id="table-body">
+                        </tbody>
+                </table>
+            </div>
+
         </div>
-        <div class="stat-box">
-            <h3>Highest Anomaly Score</h3>
-            <p id="stat-anom">--</p>
+        
+        <div id="uploadPrompt" class="text-center py-20">
+            <svg class="mx-auto h-12 w-12 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 13h6m-3-3v6m5 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+            </svg>
+            <h3 class="mt-2 text-sm font-semibold text-gray-900 dark:text-gray-200">No data loaded</h3>
+            <p class="mt-1 text-sm text-gray-500 dark:text-gray-400">Please upload your generated trends JSON file to view the dashboard.</p>
         </div>
     </div>
 
-    <div class="card">
-        <h2>Protocol Trends (TCP vs UDP)</h2>
-        <canvas id="protocolChart"></canvas>
-    </div>
+    <script>
+        // Global chart instances (needed to destroy them before re-drawing)
+        let charts = {};
+        let globalData = null;
 
-    <div class="card">
-        <h2>Encryption Growth & Anomalies</h2>
-        <canvas id="encryptionChart"></canvas>
-    </div>
-</div>
+        // --- Dark Mode Toggle ---
+        const darkModeToggle = document.getElementById('darkModeToggle');
+        const htmlElement = document.documentElement;
+        darkModeToggle.addEventListener('click', () => {
+            htmlElement.classList.toggle('dark');
+            updateChartColors();
+        });
 
-<script>
-    // Fetch the JSON generated by your Python pipeline
-    // Adjust the filename if your export named it differently
-    fetch('../reports/trends_2006_2025.json')
-        .then(response => response.json())
-        .then(data => {
-            const records = data.data; // The array of yearly stats
+        // Update chart text colors dynamically when toggling dark mode
+        function updateChartColors() {
+            const isDark = htmlElement.classList.contains('dark');
+            const textColor = isDark ? '#e5e7eb' : '#374151';
+            Chart.defaults.color = textColor;
+            Chart.defaults.borderColor = isDark ? '#374151' : '#e5e7eb';
+            for (let key in charts) {
+                if(charts[key]) charts[key].update();
+            }
+        }
+
+        // --- File Upload Handler ---
+        document.getElementById('fileUpload').addEventListener('change', function(event) {
+            const file = event.target.files[0];
+            if (file) {
+                const reader = new FileReader();
+                reader.onload = function(e) {
+                    try {
+                        const json = JSON.parse(e.target.result);
+                        globalData = json;
+                        document.getElementById('uploadPrompt').classList.add('hidden');
+                        document.getElementById('dashboardContent').classList.remove('hidden');
+                        processData(json);
+                    } catch (error) {
+                        alert("Invalid JSON file. Please upload the file generated by your Python script.");
+                    }
+                };
+                reader.readAsText(file);
+            }
+        });
+
+        // --- Main Processing Function ---
+        function processData(data) {
+            const records = data.data;
+            const milestones = data.milestones;
             
             const years = records.map(r => r.year);
-            const tcpData = records.map(r => r.tcp_pct_pkts);
-            const udpData = records.map(r => r.udp_pct_pkts);
-            const encData = records.map(r => r.encrypted_bytes_pct);
-            const anomData = records.map(r => r.anomaly_zscore);
+            const tcpData = records.map(r => r.tcp_pct_pkts || 0);
+            const udpData = records.map(r => r.udp_pct_pkts || 0);
+            const encData = records.map(r => r.encrypted_bytes_pct || 0);
+            const anomData = records.map(r => r.anomaly_zscore || 0);
+            
+            // New datasets
+            const httpData = records.map(r => r.http_bytes_pct || 0);
+            const httpsData = records.map(r => r.https_bytes_pct || 0);
+            const tcpSizeData = records.map(r => r.avg_tcp_pkt_size || 0);
+            const udpSizeData = records.map(r => r.avg_udp_pkt_size || 0);
 
-            // Update Top Stats
+            // --- 1. Populate Top Stats ---
             document.getElementById('stat-years').innerText = years.length;
             document.getElementById('stat-enc').innerText = Math.max(...encData).toFixed(1) + '%';
             document.getElementById('stat-anom').innerText = Math.max(...anomData).toFixed(2);
+            
+            const lastVol = records[records.length - 1].total_bytes || 0;
+            const volStr = lastVol > 1e9 ? (lastVol / 1e9).toFixed(2) + ' GB' : (lastVol / 1e6).toFixed(2) + ' MB';
+            document.getElementById('stat-vol').innerText = volStr;
 
+            // --- 2. Render Milestones Timeline ---
+            const mlContainer = document.getElementById('milestones-list');
+            if (milestones && milestones.length > 0) {
+                mlContainer.innerHTML = milestones.map(m => `
+                    <li class="mb-6 ml-4">
+                        <div class="absolute w-3 h-3 bg-blue-600 rounded-full mt-1.5 -left-1.5 border border-white dark:border-gray-900 dark:bg-blue-500"></div>
+                        <time class="mb-1 text-sm font-normal leading-none text-gray-400 dark:text-gray-500">${m.year}</time>
+                        <h3 class="text-lg font-semibold text-gray-900 dark:text-white">${m.event}</h3>
+                        <p class="mb-4 text-base font-normal text-gray-500 dark:text-gray-400">${m.detail}</p>
+                    </li>
+                `).join('');
+            } else {
+                mlContainer.innerHTML = `<p class="text-gray-500">No significant milestones detected.</p>`;
+            }
+
+            // --- Helper to destroy old charts ---
+            const createChart = (id, config) => {
+                if (charts[id]) charts[id].destroy();
+                charts[id] = new Chart(document.getElementById(id), config);
+            };
+
+            // --- 3. Draw Charts ---
+            
             // Chart 1: Protocols
-            new Chart(document.getElementById('protocolChart'), {
+            createChart('protocolChart', {
                 type: 'line',
-                data: {
-                    labels: years,
-                    datasets: [
-                        { label: 'TCP %', data: tcpData, borderColor: '#1976d2', tension: 0.3 },
-                        { label: 'UDP %', data: udpData, borderColor: '#388e3c', tension: 0.3 }
-                    ]
+                data: { labels: years, datasets: [
+                    { label: 'TCP %', data: tcpData, borderColor: '#3b82f6', backgroundColor: '#3b82f622', fill: true, tension: 0.3 },
+                    { label: 'UDP %', data: udpData, borderColor: '#22c55e', backgroundColor: '#22c55e22', fill: true, tension: 0.3 }
+                ]}
+            });
+
+            // Chart 2: HTTP vs HTTPS
+            createChart('httpChart', {
+                type: 'line',
+                data: { labels: years, datasets: [
+                    { label: 'HTTP %', data: httpData, borderColor: '#ef4444', borderDash: [5, 5], tension: 0.3 },
+                    { label: 'HTTPS %', data: httpsData, borderColor: '#a855f7', tension: 0.3 }
+                ]}
+            });
+
+            // Chart 3: Avg Packet Size
+            createChart('pktSizeChart', {
+                type: 'bar',
+                data: { labels: years, datasets: [
+                    { label: 'Avg TCP Size', data: tcpSizeData, backgroundColor: '#60a5fa' },
+                    { label: 'Avg UDP Size', data: udpSizeData, backgroundColor: '#4ade80' }
+                ]}
+            });
+
+            // Chart 4: Encryption & Anomalies
+            createChart('encryptionChart', {
+                type: 'bar',
+                data: { labels: years, datasets: [
+                    { label: 'Encrypted %', data: encData, backgroundColor: '#a855f7', type: 'line', tension: 0.3, yAxisID: 'y' },
+                    { label: 'Anomaly Z-Score', data: anomData, backgroundColor: '#f97316', yAxisID: 'y1' }
+                ]},
+                options: {
+                    scales: {
+                        y: { type: 'linear', display: true, position: 'left', max: 100 },
+                        y1: { type: 'linear', display: true, position: 'right', grid: { drawOnChartArea: false } }
+                    }
                 }
             });
 
-            // Chart 2: Encryption and Anomalies
-            new Chart(document.getElementById('encryptionChart'), {
-                type: 'bar',
-                data: {
-                    labels: years,
-                    datasets: [
-                        { label: 'Encrypted %', data: encData, backgroundColor: '#9c27b0', type: 'line', tension: 0.3 },
-                        { label: 'Anomaly Z-Score', data: anomData, backgroundColor: '#ff9800' }
-                    ]
+            // --- 4. Interactive Port Pie Chart ---
+            const yearSelect = document.getElementById('yearSelect');
+            yearSelect.innerHTML = years.map(y => `<option value="${y}">${y}</option>`).reverse().join('');
+            
+            const renderPieChart = () => {
+                const selectedYear = parseInt(yearSelect.value);
+                const yearData = records.find(r => r.year === selectedYear);
+                
+                let labels = [];
+                let dataPoints = [];
+                // Find top_dst_port columns
+                for(let i = 1; i <= 5; i++) {
+                    const port = yearData[`top_dst_port_${i}`];
+                    const pkts = yearData[`top_dst_port_${i}_pkts`];
+                    if(port) {
+                        labels.push(`Port ${port}`);
+                        dataPoints.push(pkts);
+                    }
                 }
+
+                createChart('portChart', {
+                    type: 'doughnut',
+                    data: {
+                        labels: labels,
+                        datasets: [{
+                            data: dataPoints,
+                            backgroundColor: ['#3b82f6', '#8b5cf6', '#ec4899', '#f97316', '#22c55e'],
+                            borderWidth: 0
+                        }]
+                    },
+                    options: { maintainAspectRatio: false }
+                });
+            };
+            
+            yearSelect.addEventListener('change', renderPieChart);
+            renderPieChart(); // Initial render
+
+            // --- 5. Interactive Data Table ---
+            const tbody = document.getElementById('table-body');
+            tbody.innerHTML = records.map(r => `
+                <tr>
+                    <td>${r.year}</td>
+                    <td>${(r.total_packets || 0).toLocaleString()}</td>
+                    <td>${(r.total_bytes || 0).toLocaleString()}</td>
+                    <td>${(r.tcp_pct_pkts || 0).toFixed(2)}</td>
+                    <td>${(r.udp_pct_pkts || 0).toFixed(2)}</td>
+                    <td>${(r.http_bytes_pct || 0).toFixed(2)}</td>
+                    <td>${(r.https_bytes_pct || 0).toFixed(2)}</td>
+                    <td>${(r.encrypted_bytes_pct || 0).toFixed(2)}</td>
+                    <td>${(r.anomaly_zscore || 0).toFixed(2)}</td>
+                </tr>
+            `).join('');
+
+            // Initialize DataTables (Destroy if it already exists from a previous upload)
+            if ($.fn.DataTable.isDataTable('#rawDataTable')) {
+                $('#rawDataTable').DataTable().destroy();
+            }
+            $('#rawDataTable').DataTable({
+                pageLength: 5,
+                lengthMenu: [5, 10, 25, 50],
+                order: [[0, "asc"]], // Sort by year ascending
             });
-        })
-        .catch(err => console.error("Error loading data. Make sure you are running a local server!", err));
-</script>
+
+            // Ensure initial colors match the theme
+            updateChartColors();
+        }
+    </script>
 </body>
 </html>
