@@ -156,6 +156,13 @@ _RENAME = {
     "http_pct"             : "http_bytes_pct",     # port-based, close enough
     "https_pct"            : "https_bytes_pct",
     "quic_pct"             : "quic_bytes_pct",
+    "gnutella_pct"         : "gnutella_pct",
+    "emule_pct"            : "emule_pct",
+    "msn_pct"              : "msn_pct",
+    "rtmp_pct"             : "rtmp_pct",
+    "telnet_pct"           : "telnet_pct",
+    "ssh_pct"              : "ssh_pct",
+    "cuseeme_pct"          : "cuseeme_pct",
     "syn_flood_flag"       : "syn_flood_flag",
     "rst_flood_flag"       : "rst_flood_flag",
     "first_ts"             : "first_ts",
