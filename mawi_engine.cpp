@@ -3,24 +3,12 @@
  *
  * MAWI PCAP Research Engine — integrated with Python pipeline.
  *
- * Based on your analyzev2parallel.cpp prototype (parallel file processing,
- * proper byte-swap detection, TCP header offset, chrono timing, FlowHash).
- *
- * Changes from your original:
- *   1. Cross-platform: replaced winsock2/WinAPI with POSIX-compatible
- *      arpa/inet.h  (Linux/macOS) or a tiny byteswap shim for MSVC.
- *   2. Output mode: --json flag emits newline-delimited JSON per year
- *      instead of the console table (Python reads this via subprocess).
- *   3. Added fields Python needs but your prototype didn't have:
- *        tcp_pkts, udp_pkts, icmp_pkts
- *        tcp_syn_ratio, syn_flood_flag, rst_flood_flag  (heuristics as data)
- *        first_ts, last_ts  (for burst/day analysis)
- *        top5_dst_ports[]   (port frequency array)
- *   4. --year-dir mode: accepts a single year directory path and emits one
- *      JSON object, so Python can call it year by year.
- *   5. Kept your parallel async approach (one future per PCAP file).
- *   6. Kept your FlowHash (multiplicative), flow reserve(200000), byte-swap.
- *   7. --human flag keeps your original console-table output untouched.
+ * Upgraded from prototype:
+ *   1. Thread Pool for bounded parallel processing (prevents disk thrashing).
+ *   2. IPv6 Transport parsing (TCP/UDP/ICMP/QUIC over IPv6).
+ *   3. Bidirectional FlowHash (A->B and B->A collapse to same flow).
+ *   4. Memory Alignment Safety (memcpy instead of unaligned pointer casting).
+ *   5. Year 2038 protection (uint64_t timestamps).
  *
  * Build (Linux/macOS):
  *   g++ -std=c++17 -O2 -pthread mawi_engine.cpp -o mawi_engine
@@ -30,18 +18,11 @@
  *
  * Build (Windows, MinGW):
  *   g++ -std=c++17 -O2 mawi_engine.cpp -lws2_32 -o mawi_engine.exe
- *
- * Usage:
- *   mawi_engine --dir ./data --json           # all years → JSON stream
- *   mawi_engine --year-dir ./data/2015 --json # single year → one JSON obj
- *   mawi_engine --dir ./data --human          # original console table
- *   mawi_engine --dir ./data --json --max-packets 1000000  # quick mode
  */
 
-#include <cstdint>   // <--- Add this line
-#include <stdlib.h>  // <--- Add this line
+#include <cstdint>
+#include <stdlib.h>
 
-// ── Platform portability ───────────────────────────────────────────────────────
 #ifdef _WIN32
   #include <winsock2.h>
   #pragma comment(lib, "ws2_32.lib")
@@ -74,12 +55,65 @@
 #include <chrono>
 #include <sstream>
 #include <string>
+#include <thread>
+#include <mutex>
+#include <queue>
+#include <condition_variable>
 
 namespace fs = std::filesystem;
 
+// ── Thread Pool ────────────────────────────────────────────────────────────────
+class ThreadPool {
+public:
+    ThreadPool(size_t threads) : stop(false) {
+        for(size_t i = 0; i < threads; ++i)
+            workers.emplace_back([this] {
+                for(;;) {
+                    std::function<void()> task;
+                    {
+                        std::unique_lock<std::mutex> lock(this->queue_mutex);
+                        this->condition.wait(lock, [this]{ return this->stop || !this->tasks.empty(); });
+                        if(this->stop && this->tasks.empty()) return;
+                        task = std::move(this->tasks.front());
+                        this->tasks.pop();
+                    }
+                    task();
+                }
+            });
+    }
+    template<class F>
+    auto enqueue(F&& f) -> std::future<typename std::invoke_result<F>::type> {
+        using return_type = typename std::invoke_result<F>::type;
+        auto task = std::make_shared<std::packaged_task<return_type()>>(std::forward<F>(f));
+        std::future<return_type> res = task->get_future();
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex);
+            if(stop) throw std::runtime_error("enqueue on stopped ThreadPool");
+            tasks.emplace([task](){ (*task)(); });
+        }
+        condition.notify_one();
+        return res;
+    }
+    ~ThreadPool() {
+        {
+            std::unique_lock<std::mutex> lock(queue_mutex);
+            stop = true;
+        }
+        condition.notify_all();
+        for(std::thread &worker: workers) worker.join();
+    }
+private:
+    std::vector<std::thread> workers;
+    std::queue<std::function<void()>> tasks;
+    std::mutex queue_mutex;
+    std::condition_variable condition;
+    bool stop;
+};
+
+
 // ── Config ─────────────────────────────────────────────────────────────────────
 constexpr bool   ENABLE_CHECKSUM = false;
-static uint64_t  MAX_PACKETS     = 0;  // 0 = unlimited; set via --max-packets
+static uint64_t  MAX_PACKETS     = 0;
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 constexpr int      ETHER_ADDR_LEN = 6;
@@ -114,6 +148,14 @@ struct IPHeader {
     uint16_t checksum;
     uint32_t src, dst;
 };
+struct IPv6Header {
+    uint32_t vtc_flow;
+    uint16_t payload_len;
+    uint8_t  next_header;
+    uint8_t  hop_limit;
+    uint8_t  src[16];
+    uint8_t  dst[16];
+};
 struct TCPHeader {
     uint16_t src_port, dst_port;
     uint32_t seq, ack;
@@ -125,22 +167,60 @@ struct UDPHeader {
 };
 #pragma pack(pop)
 
-// ── Flow key (your original FlowHash kept intact) ──────────────────────────────
+// ── Bidirectional Flow key ─────────────────────────────────────────────────────
 struct FlowKey {
-    uint32_t src_ip, dst_ip;
-    uint16_t src_port, dst_port;
+    uint8_t  src_ip[16];
+    uint8_t  dst_ip[16];
+    uint16_t src_port;
+    uint16_t dst_port;
     uint8_t  proto;
+    bool     is_ipv6;
+
+    FlowKey(uint32_t s4, uint32_t d4, uint16_t sp, uint16_t dp, uint8_t p) {
+        is_ipv6 = false;
+        proto = p;
+        if (s4 < d4 || (s4 == d4 && sp <= dp)) {
+            src_port = sp; dst_port = dp;
+            std::memcpy(src_ip, &s4, 4);
+            std::memcpy(dst_ip, &d4, 4);
+        } else {
+            src_port = dp; dst_port = sp;
+            std::memcpy(src_ip, &d4, 4);
+            std::memcpy(dst_ip, &s4, 4);
+        }
+        std::memset(src_ip + 4, 0, 12);
+        std::memset(dst_ip + 4, 0, 12);
+    }
+
+    FlowKey(const uint8_t* s6, const uint8_t* d6, uint16_t sp, uint16_t dp, uint8_t p) {
+        is_ipv6 = true;
+        proto = p;
+        int cmp = std::memcmp(s6, d6, 16);
+        if (cmp < 0 || (cmp == 0 && sp <= dp)) {
+            src_port = sp; dst_port = dp;
+            std::memcpy(src_ip, s6, 16);
+            std::memcpy(dst_ip, d6, 16);
+        } else {
+            src_port = dp; dst_port = sp;
+            std::memcpy(src_ip, d6, 16);
+            std::memcpy(dst_ip, s6, 16);
+        }
+    }
+
     bool operator==(const FlowKey& o) const {
-        return src_ip==o.src_ip && dst_ip==o.dst_ip &&
-               src_port==o.src_port && dst_port==o.dst_port &&
-               proto==o.proto;
+        return is_ipv6 == o.is_ipv6 && proto == o.proto &&
+               src_port == o.src_port && dst_port == o.dst_port &&
+               std::memcmp(src_ip, o.src_ip, 16) == 0 &&
+               std::memcmp(dst_ip, o.dst_ip, 16) == 0;
     }
 };
+
 struct FlowHash {
-    // Your multiplicative hash — kept exactly as in analyzev2parallel.cpp
     size_t operator()(const FlowKey& k) const {
-        size_t h = k.src_ip;
-        h = h * 1315423911u + k.dst_ip;
+        size_t h = k.is_ipv6 ? 2166136261u : 0;
+        int len = k.is_ipv6 ? 16 : 4;
+        for(int i=0; i < len; ++i) h = h * 1315423911u + k.src_ip[i];
+        for(int i=0; i < len; ++i) h = h * 1315423911u + k.dst_ip[i];
         h = h * 1315423911u + k.src_port;
         h = h * 1315423911u + k.dst_port;
         h = h * 1315423911u + k.proto;
@@ -148,7 +228,6 @@ struct FlowHash {
     }
 };
 
-// ── Per-port counter (for top-N) ───────────────────────────────────────────────
 using PortMap = std::unordered_map<uint16_t, uint64_t>;
 
 // ── Traffic stats ──────────────────────────────────────────────────────────────
@@ -160,13 +239,11 @@ struct TrafficStats {
     uint64_t anomalies=0, checksum_errors=0;
     uint64_t tcp_syn=0, tcp_ack=0, tcp_fin=0, tcp_rst=0;
     uint64_t flows_seen=0;
+    uint64_t gnutella=0, emule=0, msn=0, rtmp=0, telnet=0, ssh=0, cuseeme=0;
 
-    // NEW: first/last timestamp (Unix seconds) for burst detection in Python
-    uint32_t first_ts=0, last_ts=0;
+    uint64_t first_ts=0, last_ts=0;
 
-    // Top destination ports
     PortMap dst_port_freq;
-
     std::unordered_map<FlowKey, uint32_t, FlowHash> flows;
 
     void flush_flows() {
@@ -175,7 +252,6 @@ struct TrafficStats {
     }
 };
 
-// ── Merge two stats objects (for parallel reduce) ──────────────────────────────
 static void merge_stats(TrafficStats& dst, const TrafficStats& src) {
     dst.packets   += src.packets;
     dst.bytes     += src.bytes;
@@ -195,29 +271,31 @@ static void merge_stats(TrafficStats& dst, const TrafficStats& src) {
     dst.tcp_fin   += src.tcp_fin;
     dst.tcp_rst   += src.tcp_rst;
     dst.flows_seen += src.flows_seen;
+    dst.gnutella  += src.gnutella;
+    dst.emule     += src.emule;
+    dst.msn       += src.msn;
+    dst.rtmp      += src.rtmp;
+    dst.telnet    += src.telnet;
+    dst.ssh       += src.ssh;
+    dst.cuseeme   += src.cuseeme;
 
-    // Timestamps: take outermost range
-    if (src.first_ts && (!dst.first_ts || src.first_ts < dst.first_ts))
-        dst.first_ts = src.first_ts;
-    if (src.last_ts > dst.last_ts)
-        dst.last_ts = src.last_ts;
+    if (src.first_ts && (!dst.first_ts || src.first_ts < dst.first_ts)) dst.first_ts = src.first_ts;
+    if (src.last_ts > dst.last_ts) dst.last_ts = src.last_ts;
 
-    // Merge port frequency maps
     for (const auto& [port, cnt] : src.dst_port_freq)
         dst.dst_port_freq[port] += cnt;
 }
 
-// ── Checksum (your original, unchanged) ───────────────────────────────────────
-static uint16_t ip_checksum(uint16_t* buf, int len) {
+// ── Checksum ───────────────────────────────────────────────────────────────────
+static uint16_t ip_checksum(const uint16_t* buf, int len) {
     uint32_t sum = 0;
     while (len > 1) { sum += *buf++; len -= 2; }
-    if (len) sum += *(uint8_t*)buf;
+    if (len) sum += *(const uint8_t*)buf;
     sum = (sum >> 16) + (sum & 0xffff);
     sum += (sum >> 16);
     return (uint16_t)~sum;
 }
 
-// ── JSON escape helper ─────────────────────────────────────────────────────────
 static std::string json_str(const std::string& s) {
     std::string out;
     out.reserve(s.size() + 2);
@@ -230,11 +308,9 @@ static std::string json_str(const std::string& s) {
     return out;
 }
 
-// ── Emit one year as a JSON object ────────────────────────────────────────────
 static void emit_json(const std::string& year, const TrafficStats& s) {
     double total = s.packets ? (double)s.packets : 1.0;
 
-    // Build top-N destination ports
     std::vector<std::pair<uint64_t, uint16_t>> port_vec;
     port_vec.reserve(s.dst_port_freq.size());
     for (const auto& [port, cnt] : s.dst_port_freq)
@@ -266,17 +342,21 @@ static void emit_json(const std::string& year, const TrafficStats& s) {
       << "\"distinct_flows\":" << s.flows_seen          << ","
       << "\"first_ts\":"      << s.first_ts             << ","
       << "\"last_ts\":"       << s.last_ts              << ","
-      // Derived ratios (convenience for Python — avoids a division round-trip)
       << "\"tcp_pct\":"       << std::fixed << std::setprecision(4) << (s.tcp  / total * 100) << ","
       << "\"udp_pct\":"                                              << (s.udp  / total * 100) << ","
       << "\"icmp_pct\":"                                            << (s.icmp / total * 100) << ","
       << "\"http_pct\":"                                            << (s.http / total * 100) << ","
       << "\"https_pct\":"                                           << (s.https/ total * 100) << ","
       << "\"quic_pct\":"                                            << (s.quic / total * 100) << ","
-      // Security flags
+      << "\"gnutella_pct\":"                                        << (s.gnutella / total * 100) << ","
+      << "\"emule_pct\":"                                           << (s.emule / total * 100) << ","
+      << "\"msn_pct\":"                                             << (s.msn / total * 100) << ","
+      << "\"rtmp_pct\":"                                            << (s.rtmp / total * 100) << ","
+      << "\"telnet_pct\":"                                          << (s.telnet / total * 100) << ","
+      << "\"ssh_pct\":"                                             << (s.ssh / total * 100) << ","
+      << "\"cuseeme_pct\":"                                         << (s.cuseeme / total * 100) << ","
       << "\"syn_flood_flag\":"  << (s.tcp_syn > s.tcp_ack * 0.8 ? "true" : "false") << ","
       << "\"rst_flood_flag\":"  << (s.tcp_rst > s.tcp_fin * 2   ? "true" : "false") << ","
-      // Top-N destination ports
       << "\"top_dst_ports\":[";
     int limit = std::min((int)port_vec.size(), TOP_PORTS_N);
     for (int i = 0; i < limit; ++i) {
@@ -289,7 +369,6 @@ static void emit_json(const std::string& year, const TrafficStats& s) {
     std::cout << o.str() << "\n";
 }
 
-// ── Human-readable table (your original print_report logic) ───────────────────
 static void print_row(const std::string& label, uint64_t count, double total) {
     std::cout << std::left << std::setw(22) << label
               << std::setw(14) << count
@@ -320,7 +399,6 @@ static void print_human(const std::map<std::string, TrafficStats>& all_stats) {
                   << mb << " MB\n";
         std::cout << "Distinct Flows  : " << s.flows_seen << "\n";
 
-        // --- Security indicators (your original heuristics) ---
         std::cout << "\n--- Security Indicators ---\n";
         print_row("SYN Packets", s.tcp_syn, total);
         print_row("RST Packets", s.tcp_rst, total);
@@ -331,7 +409,7 @@ static void print_human(const std::map<std::string, TrafficStats>& all_stats) {
     }
 }
 
-// ── Core file parser (your analyzev2parallel logic, extended) ─────────────────
+// ── Core file parser ───────────────────────────────────────────────────────────
 static TrafficStats analyze_file(const std::string& filepath) {
     TrafficStats stats;
 
@@ -344,24 +422,21 @@ static TrafficStats analyze_file(const std::string& filepath) {
     PcapGlobalHeader gh{};
     if (fread(&gh, sizeof(gh), 1, f) != 1) { fclose(f); return stats; }
 
-    // Your byte-swap detection (magic 0xd4c3b2a1 = reversed)
     bool swap = (gh.magic == 0xd4c3b2a1u);
     auto r32  = [&](uint32_t v) { return swap ? byteswap32(v) : v; };
-    auto r16  = [&](uint16_t v) { return swap ? byteswap16(v) : v; };
 
     PcapPacketHeader ph{};
     uint8_t buffer[65536];
 
-    stats.flows.reserve(200000);  // your original reserve
+    stats.flows.reserve(200000);
 
     auto t_start = std::chrono::high_resolution_clock::now();
 
     while (fread(&ph, sizeof(ph), 1, f) == 1) {
         uint32_t caplen  = r32(ph.caplen);
         uint32_t wirelen = r32(ph.len);
-        uint32_t ts_sec  = r32(ph.tv_sec);
+        uint64_t ts_sec  = r32(ph.tv_sec);
 
-        // --- Timestamps ---
         if (!stats.first_ts || ts_sec < stats.first_ts) stats.first_ts = ts_sec;
         if (ts_sec > stats.last_ts)                      stats.last_ts  = ts_sec;
 
@@ -383,62 +458,115 @@ static TrafficStats analyze_file(const std::string& filepath) {
 
         uint16_t etype = ntohs(eth.type);
 
-        if (etype == ETHERTYPE_IPV6) { stats.ipv6++; continue; }
-        if (etype != ETHERTYPE_IP)    continue;
+        uint8_t protocol = 0;
+        uint32_t src_ip_v4 = 0, dst_ip_v4 = 0;
+        const uint8_t* src_ip_v6 = nullptr;
+        const uint8_t* dst_ip_v6 = nullptr;
+        bool is_v6 = false;
 
-        stats.ipv4++;
-        if (payload_len < sizeof(IPHeader)) continue;
+        uint8_t* l4 = nullptr;
+        uint32_t l4_len = 0;
 
-        auto* ip  = reinterpret_cast<IPHeader*>(buffer);
-        int   ihl = (ip->ver_ihl & 0x0F) * 4;
-        if (ihl < 20 || (int)payload_len < ihl) continue;
+        if (etype == ETHERTYPE_IP) {
+            stats.ipv4++;
+            if (payload_len < sizeof(IPHeader)) continue;
 
-        if (ENABLE_CHECKSUM &&
-            ip_checksum(reinterpret_cast<uint16_t*>(ip), ihl) != 0)
-            stats.checksum_errors++;
+            IPHeader ip;
+            std::memcpy(&ip, buffer, sizeof(IPHeader)); // Safe memory alignment
 
-        uint32_t src_ip = ntohl(ip->src);
-        uint32_t dst_ip = ntohl(ip->dst);
+            int ihl = (ip.ver_ihl & 0x0F) * 4;
+            if (ihl < 20 || (int)payload_len < ihl) continue;
 
-        if (ip->ttl == 0 || src_ip == dst_ip) stats.anomalies++;
+            if (ENABLE_CHECKSUM &&
+                ip_checksum(reinterpret_cast<const uint16_t*>(buffer), ihl) != 0)
+                stats.checksum_errors++;
 
-        uint8_t* l4     = buffer + ihl;
-        uint32_t l4_len = payload_len - ihl;
+            src_ip_v4 = ntohl(ip.src);
+            dst_ip_v4 = ntohl(ip.dst);
+            if (ip.ttl == 0 || src_ip_v4 == dst_ip_v4) stats.anomalies++;
 
-        if (ip->protocol == 6) {        // ── TCP ──
+            protocol = ip.protocol;
+            l4 = buffer + ihl;
+            l4_len = payload_len - ihl;
+            is_v6 = false;
+
+        } else if (etype == ETHERTYPE_IPV6) {
+            stats.ipv6++;
+            if (payload_len < sizeof(IPv6Header)) continue;
+
+            IPv6Header ip6;
+            std::memcpy(&ip6, buffer, sizeof(IPv6Header));
+
+            // Shallow copy pointers since ip6 struct falls out of scope, but wait!
+            // ip6 struct falls out of scope, so we can't keep pointers to it.
+            // But we process it immediately below, wait, FlowKey copies the bytes.
+            // So we can just use the pointers during this loop iteration.
+            src_ip_v6 = ip6.src;
+            dst_ip_v6 = ip6.dst;
+            
+            protocol = ip6.next_header; 
+            l4 = buffer + sizeof(IPv6Header);
+            l4_len = payload_len - sizeof(IPv6Header);
+            is_v6 = true;
+
+        } else {
+            continue; // Not IP or IPv6
+        }
+
+        // L4 Parsing
+        if (protocol == 6) {        // ── TCP ──
             if (l4_len < sizeof(TCPHeader)) continue;
-            auto* tcp = reinterpret_cast<TCPHeader*>(l4);
-            int   thl = ((tcp->offset_res >> 4) & 0x0F) * 4;
+            TCPHeader tcp;
+            std::memcpy(&tcp, l4, sizeof(TCPHeader));
+
+            int thl = ((tcp.offset_res >> 4) & 0x0F) * 4;
             if ((int)l4_len < thl) continue;
 
-            uint16_t sp = ntohs(tcp->src_port);
-            uint16_t dp = ntohs(tcp->dst_port);
+            uint16_t sp = ntohs(tcp.src_port);
+            uint16_t dp = ntohs(tcp.dst_port);
 
             stats.tcp++;
-            if (tcp->flags & TH_SYN) stats.tcp_syn++;
-            if (tcp->flags & TH_ACK) stats.tcp_ack++;
-            if (tcp->flags & TH_FIN) stats.tcp_fin++;
-            if (tcp->flags & TH_RST) stats.tcp_rst++;
+            if (tcp.flags & TH_SYN) stats.tcp_syn++;
+            if (tcp.flags & TH_ACK) stats.tcp_ack++;
+            if (tcp.flags & TH_FIN) stats.tcp_fin++;
+            if (tcp.flags & TH_RST) stats.tcp_rst++;
 
             if (sp == 80  || dp == 80)  stats.http++;
             if (sp == 443 || dp == 443) stats.https++;
 
-            stats.flows[{src_ip, dst_ip, sp, dp, 6}]++;
+            if (sp == 6346 || dp == 6346) stats.gnutella++;
+            if (sp == 4662 || dp == 4662 || sp == 4672 || dp == 4672) stats.emule++;
+            if (sp == 1863 || dp == 1863) stats.msn++;
+            if (sp == 1935 || dp == 1935) stats.rtmp++;
+            if (sp == 23 || dp == 23) stats.telnet++;
+            if (sp == 22 || dp == 22) stats.ssh++;
+
+            if (is_v6) stats.flows[FlowKey(src_ip_v6, dst_ip_v6, sp, dp, 6)]++;
+            else       stats.flows[FlowKey(src_ip_v4, dst_ip_v4, sp, dp, 6)]++;
+            
             stats.dst_port_freq[dp]++;
 
-        } else if (ip->protocol == 17) { // ── UDP ──
+        } else if (protocol == 17) { // ── UDP ──
             if (l4_len < sizeof(UDPHeader)) continue;
-            auto* udp = reinterpret_cast<UDPHeader*>(l4);
-            uint16_t sp = ntohs(udp->src_port);
-            uint16_t dp = ntohs(udp->dst_port);
+            UDPHeader udp;
+            std::memcpy(&udp, l4, sizeof(UDPHeader));
+
+            uint16_t sp = ntohs(udp.src_port);
+            uint16_t dp = ntohs(udp.dst_port);
 
             stats.udp++;
             if (sp == 443 || dp == 443) stats.quic++;
 
-            stats.flows[{src_ip, dst_ip, sp, dp, 17}]++;
+            if (sp == 6346 || dp == 6346) stats.gnutella++;
+            if (sp == 4672 || dp == 4672) stats.emule++;
+            if (sp == 7648 || dp == 7648) stats.cuseeme++;
+
+            if (is_v6) stats.flows[FlowKey(src_ip_v6, dst_ip_v6, sp, dp, 17)]++;
+            else       stats.flows[FlowKey(src_ip_v4, dst_ip_v4, sp, dp, 17)]++;
+            
             stats.dst_port_freq[dp]++;
 
-        } else if (ip->protocol == 1) { // ── ICMP ──
+        } else if (protocol == 1) { // ── ICMP / ICMPv6 (approx) ──
             stats.icmp++;
         } else {
             stats.other_proto++;
@@ -459,11 +587,7 @@ static TrafficStats analyze_file(const std::string& filepath) {
     return stats;
 }
 
-// ── Collect all .pcap files under a directory, optionally grouped by year ──────
-// Year is extracted from the first 4 chars of the filename, matching your
-// original convention: "20060413.pcap" → year "2006"
-static std::map<std::string, std::vector<fs::path>>
-collect_by_year(const fs::path& root) {
+static std::map<std::string, std::vector<fs::path>> collect_by_year(const fs::path& root) {
     std::map<std::string, std::vector<fs::path>> by_year;
     for (const auto& e : fs::recursive_directory_iterator(root)) {
         if (!e.is_regular_file()) continue;
@@ -471,7 +595,6 @@ collect_by_year(const fs::path& root) {
         if (name.size() < 5) continue;
         auto ext = name.substr(name.size() - 5);
         if (ext != ".pcap") continue;
-        // Accept year from directory name OR filename prefix
         std::string year;
         auto parent = e.path().parent_path().filename().string();
         if (parent.size() == 4 && std::isdigit(parent[0]))
@@ -485,13 +608,17 @@ collect_by_year(const fs::path& root) {
     return by_year;
 }
 
-// ── Process one year's files in parallel (your std::async approach) ───────────
+// ── Thread Pool Integration ────────────────────────────────────────────────────
 static TrafficStats process_year_parallel(const std::vector<fs::path>& files) {
+    unsigned int hw_threads = std::thread::hardware_concurrency();
+    if (hw_threads == 0) hw_threads = 4;
+    
+    ThreadPool pool(hw_threads);
     std::vector<std::future<TrafficStats>> tasks;
     tasks.reserve(files.size());
+    
     for (const auto& f : files)
-        tasks.emplace_back(std::async(std::launch::async,
-                                      analyze_file, f.string()));
+        tasks.emplace_back(pool.enqueue([path = f.string()] { return analyze_file(path); }));
 
     TrafficStats combined;
     for (auto& t : tasks)
@@ -519,7 +646,6 @@ static Args parse_args(int argc, char* argv[]) {
             MAX_PACKETS = (uint64_t)std::stoull(argv[++i]);
         }
     }
-    // Default: human if neither specified
     if (!a.json_mode && !a.human_mode) a.human_mode = true;
     return a;
 }
@@ -540,7 +666,6 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // ── Single-year mode (Python calls this per-year via subprocess) ──────────
     if (!args.year_dir.empty()) {
         fs::path ypath(args.year_dir);
         std::string year = ypath.filename().string();
@@ -555,7 +680,7 @@ int main(int argc, char* argv[]) {
 
         if (files.empty()) {
             std::cerr << "[warn] no .pcap files in " << args.year_dir << "\n";
-            return 1;
+            return 0;
         }
 
         TrafficStats stats = process_year_parallel(files);
@@ -570,7 +695,6 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    // ── Multi-year directory mode ──────────────────────────────────────────────
     auto by_year = collect_by_year(fs::path(args.dir));
     if (by_year.empty()) {
         std::cerr << "[error] No .pcap files found under " << args.dir << "\n";

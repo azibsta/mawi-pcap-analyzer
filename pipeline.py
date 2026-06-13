@@ -100,7 +100,7 @@ def process_year(
     # ── 1. Parquet cache ───────────────────────────────────────────────────────
     # Cache stores the raw packet DataFrame (Python path) OR a sentinel
     # parquet with a 'cpp_row' column (C++ path).
-    cache_hit = _load_cache(year)  # returns DataFrame or None
+    cache_hit = _load_cache(year) if use_cache else None
 
     # C++ path: cache stores a single-row DataFrame tagged with source='cpp'
     if cache_hit is not None and "cpp_source" in cache_hit.columns:
@@ -272,7 +272,7 @@ def export_csv(summary: pd.DataFrame, label: str = "") -> Path:
     fname += ".csv"
     out = REPORT_DIR / fname
     summary.to_csv(out, index=False)
-    print(f"\n[export] CSV  → {out}")
+    print(f"\n[export] CSV  -> {out}")
     return out
 
 
@@ -293,7 +293,7 @@ def export_json(summary: pd.DataFrame, label: str = "") -> Path:
     }
     with open(out, "w") as f:
         json.dump(payload, f, indent=2, default=str)
-    print(f"[export] JSON → {out}")
+    print(f"[export] JSON -> {out}")
     return out
 
 
