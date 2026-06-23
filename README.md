@@ -35,6 +35,11 @@ The C++ engine maps destination ports to specific application protocols.
 - **Method:** It tracks Port 80 (HTTP), 443 (HTTPS), and specific UDP payloads for QUIC to chart the rise of encrypted mobile traffic. 
 - **Legacy Decay:** It specifically targets obsolete ports (e.g., 6346 for Gnutella, 1863 for MSN Messenger) and maps their percentage of total traffic volume across the 20-year span to visualize their exact lifecycle curves from birth to death.
 
+### 4. Encryption Tracking (`encrypted_bytes_pct`)
+The system quantifies the historical adoption of secure internet protocols (which spiked dramatically post-2014) using two possible methods:
+- **Port-Based Heuristic (C++ Engine):** For high-speed parsing, it aggregates all packets flowing over known secure protocols (HTTPS/Port 443 and QUIC/UDP Port 443) and divides by total network packets.
+- **Shannon Entropy (Python Fallback):** When running in deep-packet inspection mode, it calculates the mathematical Shannon Entropy of the raw payload bytes. Highly randomized (high entropy) payloads are flagged as encrypted, whereas structured plain-text (HTTP/low entropy) are flagged as unencrypted.
+
 ## System Architecture
 
 1. **`mawi_engine.cpp`**: The C++ core. Reads PCAPs, dissects Layer 3/4 headers, and counts protocols, bandwidth, and ports.
