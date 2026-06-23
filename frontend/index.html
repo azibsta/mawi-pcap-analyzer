@@ -319,6 +319,8 @@
             const msnData = records.map(r => r.msn_pct || 0);
             const rtmpData = records.map(r => r.rtmp_pct || 0);
             const cuseemeData = records.map(r => r.cuseeme_pct || 0);
+            const telnetData = records.map(r => r.telnet_pct || 0);
+            const sshData = records.map(r => r.ssh_pct || 0);
 
             // 1. Populate Stats
             document.getElementById('stat-years').innerText = years.length;
@@ -464,7 +466,9 @@
                     { label: 'eMule (Port 4662) %', data: emuleData, borderColor: '#f97316', fill: false, tension: 0.4, borderWidth: 2 },
                     { label: 'MSN Messenger (Port 1863) %', data: msnData, borderColor: '#3b82f6', fill: false, tension: 0.4, borderWidth: 2 },
                     { label: 'RTMP / Flash (Port 1935) %', data: rtmpData, borderColor: '#10b981', fill: false, tension: 0.4, borderWidth: 2 },
-                    { label: 'CU-SeeMe (Port 7648) %', data: cuseemeData, borderColor: '#ec4899', fill: false, tension: 0.4, borderWidth: 2 }
+                    { label: 'CU-SeeMe (Port 7648) %', data: cuseemeData, borderColor: '#ec4899', fill: false, tension: 0.4, borderWidth: 2 },
+                    { label: 'Telnet (Port 23) %', data: telnetData, borderColor: '#8b5cf6', fill: false, tension: 0.4, borderWidth: 2 },
+                    { label: 'SSH (Port 22) %', data: sshData, borderColor: '#06b6d4', fill: false, tension: 0.4, borderWidth: 2 }
                 ]},
                 options: { scales: { y: { beginAtZero: true } } }
             });
