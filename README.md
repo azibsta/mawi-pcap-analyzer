@@ -40,6 +40,13 @@ The system quantifies the historical adoption of secure internet protocols (whic
 - **Port-Based Heuristic (C++ Engine):** For high-speed parsing, it aggregates all packets flowing over known secure protocols (HTTPS/Port 443 and QUIC/UDP Port 443) and divides by total network packets.
 - **Shannon Entropy (Python Fallback):** When running in deep-packet inspection mode, it calculates the mathematical Shannon Entropy of the raw payload bytes. Highly randomized (high entropy) payloads are flagged as encrypted, whereas structured plain-text (HTTP/low entropy) are flagged as unencrypted.
 
+### 5. Data Dictionary (Summary Table Columns)
+The following columns are output by the pipeline, derived via the methods below:
+- **`total_packets` & `total_bytes`**: Extracted directly by iterating the PCAP binary structure and summing Layer 3 headers.
+- **`tcp_pct_pkts` & `udp_pct_pkts`**: Calculated by counting packets with IPv4/IPv6 Protocol IDs `6` and `17` respectively, divided by `total_packets`.
+- **`http_bytes_pct` & `https_bytes_pct`**: Port-based heuristic tracking the volume of bytes flowing over TCP Ports `80` and `443`.
+- **Legacy Application Metrics** (`gnutella_pct`, `emule_pct`, `msn_pct`, `cuseeme_pct`, `telnet_pct`, `ssh_pct`): Port-based heuristics identifying the percentage of total traffic using obsolete application-layer ports (e.g., TCP 1863 for MSN, UDP 7648 for CU-SeeMe).
+
 ## System Architecture
 
 1. **`mawi_engine.cpp`**: The C++ core. Reads PCAPs, dissects Layer 3/4 headers, and counts protocols, bandwidth, and ports.
