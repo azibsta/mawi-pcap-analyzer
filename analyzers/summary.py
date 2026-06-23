@@ -164,6 +164,8 @@ def print_summary_table(df: pd.DataFrame) -> None:
         "tcp_pct_pkts", "udp_pct_pkts",
         "http_bytes_pct", "https_bytes_pct",
         "encrypted_bytes_pct",
+        "gnutella_pct", "emule_pct", "msn_pct",
+        "cuseeme_pct", "telnet_pct", "ssh_pct",
         "anomaly_zscore",
     ]
     display_cols = [c for c in cols if c in df.columns]
